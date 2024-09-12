@@ -1,0 +1,16 @@
+{
+    "name": "Netick.ENetTransport",
+    "rootNamespace": "",
+    "references": [
+        "GUID:3ec31f503417e5f49bf4337470e10e69"
+    ],
+    "includePlatforms": [],
+    "excludePlatforms": [],
+    "allowUnsafeCode": true,
+    "overrideReferences": false,
+    "precompiledReferences": [],
+    "autoReferenced": true,
+    "defineConstraints": [],
+    "versionDefines": [],
+    "noEngineReferences": false
+}
