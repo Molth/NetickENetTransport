@@ -30,19 +30,20 @@ namespace Netick.Transport
 
     public sealed unsafe class ENetConnection : TransportConnection
     {
-        private readonly ENetTransport _transport;
-        private readonly ENetEndPoint _endPoint;
+        private ENetTransport _transport;
+        private ENetEndPoint _endPoint;
         internal ENetPeer* Peer;
 
-        public ENetConnection(ENetTransport transport, ENetPeer* peer)
+        public override IEndPoint EndPoint => _endPoint;
+        public override int Mtu => (int)ENET_HOST_DEFAULT_MTU;
+
+        public void Initialize(ENetTransport transport, ENetPeer* peer)
         {
             _transport = transport;
             _endPoint = new ENetEndPoint(peer);
             Peer = peer;
         }
 
-        public override IEndPoint EndPoint => _endPoint;
-        public override int Mtu => (int)ENET_HOST_DEFAULT_MTU;
         public override void Send(IntPtr ptr, int length) => _transport.Send(Peer, ptr, length, ENetPacketFlag.ENET_PACKET_FLAG_UNSEQUENCED);
         public override void SendUserData(IntPtr ptr, int length, TransportDeliveryMethod transportDeliveryMethod) => _transport.Send(Peer, ptr, length, transportDeliveryMethod == TransportDeliveryMethod.Reliable ? ENetPacketFlag.ENET_PACKET_FLAG_RELIABLE : ENetPacketFlag.ENET_PACKET_FLAG_UNSEQUENCED);
     }
@@ -51,7 +52,8 @@ namespace Netick.Transport
     {
         private int _state;
         private ENetHost* _host;
-        private Dictionary<uint, ENetConnection> _peers;
+        private ENetConnection[] _peers;
+        private Queue<ENetConnection> _freePeers;
         private NativeConcurrentQueue<ENetEvent> _incomings;
         private NativeConcurrentQueue<nint> _removedPeers;
         private NativeConcurrentQueue<ENetOutgoing> _outgoings;
@@ -62,10 +64,6 @@ namespace Netick.Transport
         public override void Init()
         {
             Application.runInBackground = true;
-            _peers = new Dictionary<uint, ENetConnection>(0);
-            _incomings = new NativeConcurrentQueue<ENetEvent>(1, 2);
-            _removedPeers = new NativeConcurrentQueue<nint>(1, 2);
-            _outgoings = new NativeConcurrentQueue<ENetOutgoing>(1, 2);
             _buffer = new BitBuffer(createChunks: false);
         }
 
@@ -89,11 +87,19 @@ namespace Netick.Transport
         {
             if (_host != null)
                 return;
+            _incomings = new NativeConcurrentQueue<ENetEvent>(1, 2);
+            _removedPeers = new NativeConcurrentQueue<nint>(1, 2);
+            _outgoings = new NativeConcurrentQueue<ENetOutgoing>(1, 2);
             enet_initialize();
             if (mode == RunMode.Client)
+            {
+                _peers = new ENetConnection[1];
                 _host = enet_host_create(null, 1, 0, 0, 0);
+            }
             else
             {
+                _peers = new ENetConnection[Engine.MaxClients];
+                _freePeers = new Queue<ENetConnection>(Engine.MaxClients);
                 ENetAddress enetAddress;
                 enet_set_ip(&enetAddress, Socket.OSSupportsIPv6 ? "::0" : "0.0.0.0");
                 enetAddress.port = (ushort)port;
@@ -166,8 +172,12 @@ namespace Netick.Transport
             {
                 if (_host != null)
                 {
-                    foreach (var peer in _peers.Values)
-                        enet_peer_disconnect_now(peer.Peer, 0);
+                    foreach (var peer in _peers)
+                    {
+                        if (peer != null)
+                            enet_peer_disconnect_now(peer.Peer, 0);
+                    }
+
                     enet_host_flush(_host);
                     enet_host_destroy(_host);
                 }
@@ -179,7 +189,6 @@ namespace Netick.Transport
                 while (_incomings.TryDequeue(out var networkEvent))
                     enet_packet_destroy(networkEvent.packet);
                 _incomings.Dispose();
-                _peers.Clear();
                 enet_deinitialize();
             }
         }
@@ -195,16 +204,25 @@ namespace Netick.Transport
                 switch (netEvent.type)
                 {
                     case ENetEventType.ENET_EVENT_TYPE_CONNECT:
-                        connection = new ENetConnection(this, peer);
+                        if (_freePeers == null || !_freePeers.TryDequeue(out connection))
+                            connection = new ENetConnection();
+                        connection.Initialize(this, peer);
                         _peers[peer->incomingPeerID] = connection;
                         NetworkPeer.OnConnected(connection);
                         continue;
                     case ENetEventType.ENET_EVENT_TYPE_DISCONNECT:
-                        if (_peers.Remove(peer->incomingPeerID, out connection))
+                        connection = _peers[peer->incomingPeerID];
+                        if (connection != null)
+                        {
+                            _peers[peer->incomingPeerID] = null;
                             NetworkPeer.OnDisconnected(connection, TransportDisconnectReason.Shutdown);
+                            _freePeers?.Enqueue(connection);
+                        }
+
                         continue;
                     case ENetEventType.ENET_EVENT_TYPE_RECEIVE:
-                        if (_peers.TryGetValue(peer->incomingPeerID, out connection))
+                        connection = _peers[peer->incomingPeerID];
+                        if (connection != null)
                         {
                             _buffer.SetFrom(netEvent.packet->data, (int)netEvent.packet->dataLength, (int)netEvent.packet->dataLength);
                             NetworkPeer.Receive(connection, _buffer);
