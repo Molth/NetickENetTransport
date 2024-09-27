@@ -26,6 +26,11 @@ namespace Netick.Transport
 
         public string IPAddress { get; }
         public int Port { get; }
+
+        public override string ToString()
+        {
+            return $"{IPAddress}:{Port}";
+        }
     }
 
     public sealed unsafe class ENetConnection : TransportConnection
